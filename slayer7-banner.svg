@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 200">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0d0d0d"/>
+      <stop offset="50%" style="stop-color:#1a0a0a"/>
+      <stop offset="100%" style="stop-color:#0d0d0d"/>
+    </linearGradient>
+    <linearGradient id="redGlow" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ff1a1a"/>
+      <stop offset="50%" style="stop-color:#ff4444"/>
+      <stop offset="100%" style="stop-color:#cc0000"/>
+    </linearGradient>
+    <linearGradient id="sevenGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff4444"/>
+      <stop offset="100%" style="stop-color:#990000"/>
+    </linearGradient>
+    <filter id="bigGlow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="subtleGlow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="800" height="200" fill="url(#bg)" rx="12"/>
+
+  <!-- Subtle grid -->
+  <g opacity="0.05" stroke="#ff3333">
+    <line x1="0" y1="50" x2="800" y2="50" stroke-width="0.5"/>
+    <line x1="0" y1="100" x2="800" y2="100" stroke-width="0.5"/>
+    <line x1="0" y1="150" x2="800" y2="150" stroke-width="0.5"/>
+    <line x1="100" y1="0" x2="100" y2="200" stroke-width="0.5"/>
+    <line x1="200" y1="0" x2="200" y2="200" stroke-width="0.5"/>
+    <line x1="300" y1="0" x2="300" y2="200" stroke-width="0.5"/>
+    <line x1="400" y1="0" x2="400" y2="200" stroke-width="0.5"/>
+    <line x1="500" y1="0" x2="500" y2="200" stroke-width="0.5"/>
+    <line x1="600" y1="0" x2="600" y2="200" stroke-width="0.5"/>
+    <line x1="700" y1="0" x2="700" y2="200" stroke-width="0.5"/>
+  </g>
+
+  <!-- Left accent bar -->
+  <rect x="0" y="0" width="4" height="200" fill="url(#redGlow)" opacity="0.9"/>
+
+  <!-- Lightning bolt icon -->
+  <g transform="translate(55, 55)" filter="url(#bigGlow)">
+    <polygon points="30,0 12,38 24,38 10,80 50,30 35,30 48,0" fill="url(#redGlow)" opacity="0.95"/>
+  </g>
+
+  <!-- Main title: SLAYER -->
+  <text x="130" y="120" font-family="'Courier New', 'Fira Code', monospace" font-size="76" font-weight="900" fill="url(#redGlow)" filter="url(#bigGlow)" letter-spacing="6">SLAYER</text>
+
+  <!-- Big 7 -->
+  <text x="575" y="132" font-family="'Courier New', 'Fira Code', monospace" font-size="115" font-weight="900" fill="url(#sevenGrad)" filter="url(#bigGlow)" opacity="0.95">7</text>
+
+  <!-- Tagline -->
+  <text x="135" y="155" font-family="'Courier New', 'Fira Code', monospace" font-size="12" fill="#666666" letter-spacing="4">MULTI-VECTOR HTTP STRESS TESTING FRAMEWORK</text>
+
+  <!-- Bottom accent line -->
+  <line x1="130" y1="168" x2="640" y2="168" stroke="#ff0000" stroke-width="1" opacity="0.15"/>
+
+  <!-- Decorative dots -->
+  <circle cx="135" cy="180" r="2" fill="#ff3333" opacity="0.4"/>
+  <circle cx="145" cy="180" r="2" fill="#ff3333" opacity="0.25"/>
+  <circle cx="155" cy="180" r="2" fill="#ff3333" opacity="0.15"/>
+
+  <!-- Blinking cursor -->
+  <rect x="632" y="172" width="8" height="14" fill="#ff3333" opacity="0.5">
+    <animate attributeName="opacity" values="0.5;0;0.5" dur="1.2s" repeatCount="indefinite"/>
+  </rect>
+</svg>
