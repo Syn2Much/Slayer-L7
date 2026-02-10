@@ -12,6 +12,8 @@ Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massi
 > Unauthorized use is illegal.
 
 ---
+> HTTP/2 Rapid-Reset Exploit 1M+ RPS
+![Animation](https://github.com/user-attachments/assets/f33cb033-dfb6-4101-bdb5-507f2e5ad83e)
 
 ## **6 Attack Methods**
   * **HTTP GET** – Standard GET requests with configurable parameters
