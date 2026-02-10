@@ -25,17 +25,11 @@ Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massi
   * API JSON Flood
 
 * **Proxy Support**
-
   * Load proxies from file
   * Automatic deduplication
   * Connection pooling (32 clients per proxy)
 
-* **Direct Mode**
-
-  * Run without proxies for local or authorized testing
-
 * **Massive Concurrency**
-
   * Default: **2048 workers**
   * Fully configurable
 
@@ -43,13 +37,6 @@ Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massi
 
   * 300+ User-Agents (Randomized per requests)
   * Chrome, Firefox, Edge, Safari, mobile browsers, and more
-
-* **Dynamic Payloads**
-
-  * Randomized form data
-  * JSON bodies
-  * GraphQL queries
-  * Binary blobs (per request)
 
 * **Live Statistics**
 
