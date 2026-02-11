@@ -1332,7 +1332,7 @@ func Worker(targetURL string, method string, clients []*http.Client, stop <-chan
 			err = httpRudy(targetURL, client, stop)
 		case "apiflood":
 			err = httpAPIFlood(targetURL, client)
-		case "rapidreset", "rapidrest":
+		case "rapidreset", "rapidreset":
 			// Raw HTTP/2 — bypasses http.Client entirely
 			err = httpRapidReset(targetURL, stop)
 		case "wsflood":
@@ -1387,7 +1387,7 @@ func main() {
 	// Validate method before doing anything
 	validMethods := map[string]bool{
 		"httpget": true, "httppost": true, "rudy": true,
-		"apiflood": true, "rapidreset": true, "rapidrest": true, "wsflood": true,
+		"apiflood": true, "rapidreset": true, "rapidreset": true, "wsflood": true,
 	}
 	if !validMethods[strings.ToLower(*method)] {
 		fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
