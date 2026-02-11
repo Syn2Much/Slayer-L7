@@ -15,14 +15,16 @@ Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massi
 > HTTP/2 Rapid-Reset Exploit 1M+ RPS
 ![Animation](https://github.com/user-attachments/assets/f33cb033-dfb6-4101-bdb5-507f2e5ad83e)
 
-## **6 Attack Methods**
-  * **HTTP GET** – Standard GET requests with configurable parameters
-  * **HTTP POST** – POST requests with form data or JSON payloads
-  * **HTTP/2 Rapid Reset** – Raw framer implementation of CVE-2023-44487 with HPACK encoding and batched frame writes
-  * **WebSocket Flood** – WebSocket connection flood with message bombardment
-  * **RUDY (Slow POST)** – Slow POST technique that drips bytes at 0.5–2.5 second intervals to hold connections open
-  * **API JSON Flood** – JSON payload flood targeting REST API endpoints
+## 🧪 Methods
 
+| Method       | Description                                                  |
+| ------------ | ------------------------------------------------------------ |
+| `httpget`    | Standard HTTP GET flood                                      |
+| `httppost`   | HTTP POST with randomized form / JSON payloads               |
+| `rudy`       | Slow POST — large `Content-Length`, drips bytes              |
+| `apiflood`   | JSON API flood with randomized endpoints and nested payloads |
+| `rapidreset` | HTTP/2 Rapid Reset (CVE-2023-44487)                          |
+| `wsflood`    | WebSocket connection flood with mixed traffic                |
 
 ## 📦 Installation
 
@@ -30,10 +32,11 @@ Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massi
 
 * **Go 1.21+**
 
-### Build
+### Quick Setup
 
 ```bash
-go mod init slayer
+git clone https://github.com/Syn2Much/Slayer-L7.git
+cd Slayer-L7
 go mod tidy
 go build -o slayer .
 ```
@@ -57,16 +60,6 @@ slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]
 
 ---
 
-## 🧪 Methods
-
-| Method       | Description                                                  |
-| ------------ | ------------------------------------------------------------ |
-| `httpget`    | Standard HTTP GET flood                                      |
-| `httppost`   | HTTP POST with randomized form / JSON payloads               |
-| `rudy`       | Slow POST — large `Content-Length`, drips bytes              |
-| `apiflood`   | JSON API flood with randomized endpoints and nested payloads |
-| `rapidreset` | HTTP/2 Rapid Reset (CVE-2023-44487)                          |
-| `wsflood`    | WebSocket connection flood with mixed traffic                |
 
 ---
 ### Dependencies
