@@ -6,11 +6,6 @@
 A high-performance, multi-method HTTP/S stress testing tool written in **Go**.
 Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massive concurrent worker pools.
 
-> **⚠️ Disclaimer**
-> This tool is intended **only** for authorized security testing and research.
-> Use **only** against systems you own or have **explicit written permission** to test.
-> Unauthorized use is illegal.
- 
 ---
 > HTTP/2 Rapid-Reset Exploit 1M+ RPS
 ![Animation](https://github.com/user-attachments/assets/f33cb033-dfb6-4101-bdb5-507f2e5ad83e)
@@ -104,12 +99,15 @@ http://proxy1.example.com:8080
 http://user:pass@proxy2.example.com:3128
 socks5://proxy3.example.com:1080
 ```
-
-
-
-##  License
-
-**For authorized testing only.**
-Use responsibly.
-
 ---
+> **⚠️ Disclaimer**
+> This tool is intended **only** for authorized security testing and research.
+> Use **only** against systems you own or have **explicit written permission** to test.
+> Unauthorized use is illegal.
+ 
+## 👤 Author
+
+**Syn2Much**
+
+[![Email](https://img.shields.io/badge/Email-dev%40sinnners.city-red?style=flat-square&logo=gmail)](mailto:dev@sinnners.city)
+[![X](https://img.shields.io/badge/@synacket-black?style=flat-square&logo=x)](https://x.com/synacket)
