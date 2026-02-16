@@ -1,9 +1,7 @@
 
 # ⚔️ Slayer 7 - Application Layer Attack Suite
 
-![Slayer 7](slayer7-banner.svg)
-
-A high-performance, multi-method HTTP/S stress testing tool written in **Go**.
+> A high-performance, multi-method HTTP/S stress testing tool written in **Go**.
 Supports both HTTP and HTTPS, multiple attack vectors, proxy rotation, and massive concurrent worker pools.
 
 ---
