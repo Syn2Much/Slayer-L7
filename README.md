@@ -107,5 +107,5 @@ socks5://proxy3.example.com:1080
 
 **Syn2Much**
 
-[![Email](https://img.shields.io/badge/Email-dev%40sinnners.city-red?style=flat-square&logo=gmail)](mailto:dev@sinnners.city)
+[![Email](https://img.shields.io/badge/Email-hell%40sinnners.city-red?style=flat-square&logo=gmail)](mailto:hell@sinnners.city)
 [![X](https://img.shields.io/badge/@synacket-black?style=flat-square&logo=x)](https://x.com/synacket)
